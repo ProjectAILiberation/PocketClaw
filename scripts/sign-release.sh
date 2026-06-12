@@ -15,8 +15,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# 私钥仅存于 secrets/（已 .gitignore，维护者离线保管，绝不分发）。
 PRIVATE_KEY="$PROJECT_DIR/secrets/sign.key"
-PUBLIC_KEY="$PROJECT_DIR/secrets/sign.pub"
+# 公钥「钉死」在仓库内的固定路径并随产品分发——验证时只信任此处的公钥，
+# 绝不从被验证的下载包里读取公钥（否则攻击者重打包时塞自己的公钥即可绕过验签）。
+PUBLIC_KEY="$PROJECT_DIR/config/release-signing.pub"
 
 # ── 帮助 ──
 usage() {
@@ -52,30 +55,27 @@ do_keygen() {
         [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ] && exit 0
     fi
 
-    mkdir -p "$PROJECT_DIR/secrets"
-    
+    mkdir -p "$PROJECT_DIR/secrets" "$PROJECT_DIR/config"
+
     # 生成 Ed25519 私钥
     openssl genpkey -algorithm Ed25519 -out "$PRIVATE_KEY" 2>/dev/null
     chmod 600 "$PRIVATE_KEY"
-    
-    # 导出公钥
+
+    # 导出公钥到「钉死」的固定路径（此文件应提交进 Git 并随产品分发）
     openssl pkey -in "$PRIVATE_KEY" -pubout -out "$PUBLIC_KEY" 2>/dev/null
-    
+
     echo ""
     echo "[OK] Ed25519 密钥对已生成"
-    echo "  私钥: $PRIVATE_KEY  (⚠️ 请安全保管，勿提交到 Git)"
-    echo "  公钥: $PUBLIC_KEY   (应随发布包分发)"
+    echo "  私钥: $PRIVATE_KEY  (⚠️ 离线安全保管，绝不提交 Git / 绝不进发行包)"
+    echo "  公钥: $PUBLIC_KEY   (✅ 请 git add 提交此文件——它是验签的唯一信任锚)"
     echo ""
     echo "公钥内容:"
     cat "$PUBLIC_KEY"
-    
-    # 添加到 .gitignore
-    GITIGNORE="$PROJECT_DIR/.gitignore"
-    if [ -f "$GITIGNORE" ]; then
-        if ! grep -q "sign.key" "$GITIGNORE" 2>/dev/null; then
-            echo "secrets/sign.key" >> "$GITIGNORE"
-        fi
-    fi
+    echo ""
+    echo "下一步（让签名更新生效）:"
+    echo "  1) git add config/release-signing.pub && git commit  # 固定信任锚"
+    echo "  2) 发布时对 ZIP 执行: bash scripts/sign-release.sh sign <zip>"
+    echo "  3) 把生成的 <zip>.sig 一并上传到下载源，与 ZIP 同目录同名"
 }
 
 # ── 签名 ──
@@ -135,60 +135,34 @@ do_verify() {
     fi
     
     local SIG_FILE="${FILE}.sig"
-    local HASH_FILE="${FILE}.sha256"
-    local PUB_KEY=""
-    
-    # 查找公钥（优先当前目录，然后 secrets/）
-    if [ -f "$PUBLIC_KEY" ]; then
-        PUB_KEY="$PUBLIC_KEY"
-    elif [ -f "./sign.pub" ]; then
-        PUB_KEY="./sign.pub"
-    else
-        echo "[错误] 找不到公钥文件"
-        echo "  期望路径: $PUBLIC_KEY 或当前目录 sign.pub"
-        exit 1
-    fi
-    
+
     echo "验证文件: $FILE"
-    
-    # 检查 SHA-256
-    local RESULT_SHA="❌"
-    if [ -f "$HASH_FILE" ]; then
-        local EXPECTED ACTUAL
-        EXPECTED=$(cat "$HASH_FILE")
-        if command -v sha256sum &>/dev/null; then
-            ACTUAL=$(sha256sum "$FILE" | awk '{print $1}')
-        else
-            ACTUAL=$(shasum -a 256 "$FILE" | awk '{print $1}')
-        fi
-        if [ "$EXPECTED" = "$ACTUAL" ]; then
-            RESULT_SHA="✅"
-        fi
-    else
-        RESULT_SHA="⏭️ (无 .sha256 文件)"
+
+    # 信任锚：只用钉死在仓库内的公钥。缺失即视为「未配置签名更新」，硬失败。
+    if [ ! -f "$PUBLIC_KEY" ] || ! grep -q "BEGIN PUBLIC KEY" "$PUBLIC_KEY" 2>/dev/null; then
+        echo "[错误] 未找到有效的钉死公钥: $PUBLIC_KEY"
+        echo "       维护者尚未启用签名更新（运行 sign-release.sh keygen 并提交公钥）。"
+        echo "       出于安全，拒绝验证未签名的包。"
+        return 2   # 2 = 未配置签名（调用方据此区分「未启用」与「验签失败」）
     fi
-    echo "  SHA-256:  $RESULT_SHA"
-    
-    # 验证 Ed25519 签名
-    local RESULT_SIG="❌"
-    if [ -f "$SIG_FILE" ]; then
-        if openssl pkeyutl -verify -pubin -inkey "$PUB_KEY" \
-            -rawin -in "$FILE" -sigfile "$SIG_FILE" 2>/dev/null; then
-            RESULT_SIG="✅"
-        fi
-    else
-        RESULT_SIG="⏭️ (无 .sig 文件)"
+
+    # 签名缺失 = 硬失败（绝不「无签名即放行」）。
+    if [ ! -f "$SIG_FILE" ]; then
+        echo "[错误] 缺少签名文件: $SIG_FILE"
+        echo "       未签名的包一律拒绝安装。"
+        return 1
     fi
-    echo "  签名:     $RESULT_SIG"
-    
-    echo ""
-    if [[ "$RESULT_SHA" == "✅" ]] && [[ "$RESULT_SIG" == "✅" ]]; then
-        echo "[OK] 验证通过 — 文件完整且来自可信发布者"
-    elif [[ "$RESULT_SHA" == "❌" ]] || [[ "$RESULT_SIG" == "❌" ]]; then
-        echo "[错误] 验证失败 — 文件可能被篡改！"
-        exit 1
+
+    # 验证 Ed25519 签名（这是唯一的真实性来源；SHA-256 仅作完整性辅助、不提供真实性）。
+    if openssl pkeyutl -verify -pubin -inkey "$PUBLIC_KEY" \
+        -rawin -in "$FILE" -sigfile "$SIG_FILE" >/dev/null 2>&1; then
+        echo "  签名:     ✅ 通过"
+        echo "[OK] 验证通过 — 文件来自可信发布者且未被篡改"
+        return 0
     else
-        echo "[警告] 部分校验文件缺失，无法完全验证"
+        echo "  签名:     ❌ 失败"
+        echo "[错误] 签名验证失败 — 文件可能被篡改或来源不可信！拒绝安装。"
+        return 1
     fi
 }
 

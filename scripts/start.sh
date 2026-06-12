@@ -346,8 +346,21 @@ else
     # 用 curl 快速检测（5秒超时），比 docker pull 快得多
     if ! curl -s --connect-timeout 5 --max-time 10 https://registry-1.docker.io/v2/ >/dev/null 2>&1; then
         echo ""
-        echo "[信息] Docker Hub 不可达，正在自动配置国内镜像加速器..."
+        echo "[信息] Docker Hub 不可达。可配置国内镜像加速器以便拉取基础镜像。"
+        # 安全（修复审计 High）：不再静默改写宿主机【全局】 daemon.json。
+        # 这会影响该机此后所有 docker.io 拉取（包括你其它项目），且第三方镜像站可成为
+        # 供应链中间人。因此改为：明确征得用户同意后再写入，并在写入前备份原文件。
+        echo "      它会修改宿主机全局 Docker 配置（$DAEMON_JSON），将镜像源指向："
+        echo "        https://docker.1ms.run, https://docker.xuanyuan.me （第三方，非官方）"
+        echo "      该改动是全局且持久的（PocketClaw 退出后仍生效）。"
+        printf "      是否允许修改全局 Docker 配置？(y/N): "
+        read -r MIRROR_CONSENT
+        if [ "$MIRROR_CONSENT" != "y" ] && [ "$MIRROR_CONSENT" != "Y" ]; then
+            echo "[信息] 已跳过镜像加速器配置（构建可能较慢，或请自行配置可信镜像源）。"
+        else
         mkdir -p "$(dirname "$DAEMON_JSON")"
+        # 备份原配置，便于事后恢复
+        [ -f "$DAEMON_JSON" ] && cp "$DAEMON_JSON" "${DAEMON_JSON}.pocketclaw-bak.$(date +%s)" 2>/dev/null || true
         if [ -f "$DAEMON_JSON" ]; then
             python3 -c "
 import json
@@ -360,7 +373,7 @@ json.dump(cfg, open('$DAEMON_JSON','w'), indent=2)
         else
             echo '{"registry-mirrors":["https://docker.1ms.run","https://docker.xuanyuan.me"]}' > "$DAEMON_JSON"
         fi
-        echo "[OK] 镜像加速器已配置"
+        echo "[OK] 镜像加速器已配置（原配置已备份为 ${DAEMON_JSON}.pocketclaw-bak.*）"
         # 仅 Docker Desktop 需要重启
         if [ "$USING_COLIMA" -eq 0 ] && open -a "Docker" 2>/dev/null; then
             echo "[信息] 正在重启 Docker Desktop 以应用配置..."
@@ -379,6 +392,7 @@ json.dump(cfg, open('$DAEMON_JSON','w'), indent=2)
             echo "[OK] Docker 已重启，镜像加速器已生效"
         else
             echo "[信息] 镜像加速器配置已写入，将在下次 Docker 启动时生效"
+        fi
         fi
     else
         echo "[OK] Docker Hub 连接正常"
@@ -419,18 +433,13 @@ if [ -n "$CURRENT_HASH" ] && [ "$CURRENT_HASH" = "$PREV_HASH" ]; then
     fi
 fi
 
+# 安全（修复审计 Critical #2）：移除从 Docker Hub 拉取 pocketclaw/pocketclaw:latest 的快速路径。
+# 该命名空间并非本项目所有（真实仓库 tinqiao-oss/PocketClaw）、CI 也从不向其推送镜像，
+# 浮动 :latest 既无 digest 又无签名校验，一旦被他人抢注即等于大规模 RCE。
+# 因此一律按钉死版本的 Dockerfile 本地构建；若将来要分发官方预构建镜像，应：
+# 受控账号 push + digest 钉死 + cosign 验签通过后再启用，绝不 fail-open 静默跳过。
 if [ "$NEED_BUILD" -eq 1 ]; then
-    # 尝试从 Docker Hub 拉取预构建镜像（D1: 省去本地构建时间）
-    DOCKER_IMAGE="pocketclaw/pocketclaw:latest"
-    echo "[5/7] 尝试拉取预构建镜像..."
-    if docker pull "$DOCKER_IMAGE" >> "$BUILD_LOG" 2>&1; then
-        docker tag "$DOCKER_IMAGE" pocketclaw-pocketclaw:latest >> "$BUILD_LOG" 2>&1
-        NEED_BUILD=0
-        echo "[OK] 预构建镜像拉取成功，跳过本地构建"
-        [ -n "$CURRENT_HASH" ] && echo "$CURRENT_HASH" > "$BUILD_HASH_FILE"
-    else
-        echo "[信息] 预构建镜像不可用，将进行本地构建"
-    fi
+    echo "[5/7] 将按钉死的 OpenClaw 版本本地构建镜像（可复现、来源可信）..."
 fi
 
 if [ "$NEED_BUILD" -eq 1 ]; then
@@ -495,9 +504,12 @@ fi
 echo ""
 echo "[5/7] 镜像构建 ✓"
 
-# ── Skill 安全扫描（启动前检查用户 Skill 文件）──
+# ── Skill 安全扫描（启动前检查真正生效的 Skill 文件）──
+# 修复审计 High：原来扫的是常年为空的 data/skills，真正被 agent 加载的在 config/workspace/skills。
 if [ -f "$PROJECT_DIR/scripts/skill-check.sh" ]; then
-    bash "$PROJECT_DIR/scripts/skill-check.sh" "$PROJECT_DIR/data/skills"
+    bash "$PROJECT_DIR/scripts/skill-check.sh" "$PROJECT_DIR/config/workspace/skills"
+    # 同时扫一遍 data/skills（如有 clawhub 远程技能落地于此）
+    [ -d "$PROJECT_DIR/data/skills" ] && bash "$PROJECT_DIR/scripts/skill-check.sh" "$PROJECT_DIR/data/skills"
 fi
 
 # ── 第二步：启动容器 ──

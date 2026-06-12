@@ -272,7 +272,7 @@ set "SECRETS_DIR=%PROJECT_DIR%\secrets"
 if not exist "%SECRETS_DIR%" mkdir "%SECRETS_DIR%"
 set "ENC_FILE=%SECRETS_DIR%\.env.encrypted"
 
-<nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 ^
+<nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 ^
     -in "%ENV_FILE%" ^
     -out "!ENC_FILE!" ^
     -pass stdin 2>nul

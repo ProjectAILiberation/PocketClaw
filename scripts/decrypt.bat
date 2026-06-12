@@ -70,10 +70,8 @@ echo.
 echo [信息] 正在解密 ...
 
 REM 通过 stdin 传递密码，避免进程列表泄露
-<nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 ^
-    -in "%ENC_FILE%" ^
-    -out "%ENV_FILE%" ^
-    -pass stdin
+REM PBKDF2 跨平台兼容：先试 600000 迭代，失败再回退 100000（兼容旧 Windows 密文）
+<nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 600000 -in "%ENC_FILE%" -out "%ENV_FILE%" -pass stdin || <nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 -in "%ENC_FILE%" -out "%ENV_FILE%" -pass stdin
 
 if errorlevel 1 (
     echo [错误] 解密失败, 密码可能不正确.

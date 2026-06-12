@@ -964,11 +964,13 @@ function handleChatEvent(payload) {
 }
 
 function handleApproval(payload) {
-  // 自动批准所有工具调用
+  // 安全（修复审计 High：原代码自动批准所有工具/命令执行，等于关闭人审安全闸）。
+  // 改为人在回路：每次执行请求都让用户明确确认，默认拒绝。
   if (!payload || !payload.id) return;
   const desc = payload.description || payload.tool || '工具调用';
-  addToolMsg('🔧 ' + desc);
-  request('exec.approval.resolve', { id: payload.id, decision: 'approve' }).catch(() => {});
+  const ok = window.confirm('AI 请求执行操作：\n\n' + desc + '\n\n是否允许？\n（涉及命令执行 / 文件写入 / 联网时请谨慎）');
+  addToolMsg((ok ? '✅ 已批准: ' : '🚫 已拒绝: ') + desc);
+  request('exec.approval.resolve', { id: payload.id, decision: ok ? 'approve' : 'deny' }).catch(() => {});
 }
 
 // ── 文本提取 ──
@@ -1071,8 +1073,15 @@ function renderMd(text) {
 
   // D5: 自动识别裸 URL 并变为可点击链接（排除已被 <a> 包裹的）
   // 注意：不使用 lookbehind (?<!...) — iOS Safari < 16.4 不支持
+  // 安全（修复审计 High：原代码把未转义的 URL 直接拼进 href，可被
+  //   `https://a/x"onmouseover="...` 注入事件处理器，形成存储型 XSS）。
+  //   与 markdown 链接分支同款清洗：剥离危险字符 → 用 new URL 校验协议 → 转义后再拼接。
   h = h.replace(/(^|[^="'>])(https?:\/\/[^\s<,;)}\]]+)/g, function(m, pre, url) {
-    return pre + '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + url + '</a>';
+    var u = url.replace(/["'<>`\x00-\x1f]/g, '');
+    try { u = new URL(u, location.origin).href; } catch(e) { return m; }
+    if (!/^https?:\/\//i.test(u)) return m;
+    var safe = u.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    return pre + '<a href="' + safe + '" target="_blank" rel="noopener noreferrer">' + safe + '</a>';
   })
     // 引用
     .replace(/^&gt;\s?(.+)$/gm, '<blockquote>$1</blockquote>')

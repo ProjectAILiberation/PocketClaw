@@ -94,7 +94,9 @@ load_provider() {
     fi
     BASE_URL=$(jq -r ".\"$_prov\".baseUrl" "$PROVIDERS_JSON")
     PROVIDER_LABEL=$(jq -r ".\"$_prov\".label" "$PROVIDERS_JSON")
-    MODELS=$(jq -c ".\"$_prov\".models" "$PROVIDERS_JSON")
+    # OpenClaw 2026.4+ 要求 models 为 [{id,name}] 对象数组（旧版接受字符串数组）。
+    # 这里把 providers.json 里的字符串条目转成 {id,name}，已是对象的原样保留。
+    MODELS=$(jq -c ".\"$_prov\".models | map(if type==\"string\" then {id:., name:.} else . end)" "$PROVIDERS_JSON")
     if [ -z "$MODEL_ID" ]; then
       MODEL_ID=$(jq -r ".\"$_prov\".defaultModel" "$PROVIDERS_JSON")
     fi
@@ -125,7 +127,9 @@ model_id = env_model if env_model else p["defaultModel"]
 print(f'BASE_URL={p["baseUrl"]}')
 print(f'MODEL_ID={model_id}')
 print(f'PROVIDER_LABEL={p["label"]}')
-print(f"MODELS={json.dumps(p['models'])}")
+# OpenClaw 2026.4+ 要求 models 为 [{id,name}]；字符串条目转对象，已是对象的保留。
+_models = [{"id": m, "name": m} if isinstance(m, str) else m for m in p["models"]]
+print(f"MODELS={json.dumps(_models)}")
 PYEOF
     )
     # Q2: 安全解析 —— 逐行 read 替代 eval
@@ -157,70 +161,105 @@ build_channels() {
     printf '%s' "$val"
   }
 
-  # 辅助函数: 添加简单频道（单 token 类型）
-  _add_simple_channel() {
-    local name="$1" env_var="$2" json_key="$3" label="$4"
-    local val="${!env_var:-}"
-    if [[ -n "$val" ]]; then
-      val=$(_json_escape "$val")
-      channels="${channels}\"${name}\":{\"${json_key}\":\"${val}\"},"
-      ACTIVE_CHANNELS="${ACTIVE_CHANNELS}  ✅ ${label}\n"
-    fi
+  # 安全：把 "<CHAN>_ALLOW_FROM" 逗号列表转成 JSON 数组（每个元素已转义）。
+  # 未设置则返回空串，调用方据此拒绝开放该频道。
+  _allow_array() {
+    local raw="${1:-}"
+    [[ -z "$raw" ]] && { printf ''; return; }
+    local out="[" item
+    IFS=',' read -ra _items <<< "$raw"
+    for item in "${_items[@]}"; do
+      item=$(echo "$item" | xargs)        # 去首尾空白
+      [[ -z "$item" ]] && continue
+      out="${out}\"$(_json_escape "$item")\","
+    done
+    [[ "$out" == "[" ]] && { printf ''; return; }   # 全是空白项
+    printf '%s]' "${out%,}"
   }
 
-  # 辅助函数: 添加双参数频道
+  # 安全红线（修复审计 Critical #3：IM 频道无发送方白名单）：
+  # 公网可达频道（Telegram/Discord/Slack/Signal/Teams）必须配套 <CHAN>_ALLOW_FROM 白名单，
+  # 否则互联网任何陌生人都能私聊一个 tools.profile=full 的 Agent。未配置白名单一律拒绝接入。
+  # 辅助函数: 添加单 token 频道（强制白名单）
+  _add_simple_channel() {
+    local name="$1" env_var="$2" json_key="$3" label="$4" allow_env="$5"
+    local val="${!env_var:-}"
+    [[ -z "$val" ]] && return
+    local allow
+    allow=$(_allow_array "${!allow_env:-}")
+    if [[ -z "$allow" ]]; then
+      echo "[PocketClaw] ⚠ ${label} 已配置 ${env_var}，但未设置白名单 ${allow_env}，出于安全已跳过该频道。"
+      echo "[PocketClaw]   请在 .env.channels 中设置 ${allow_env}（允许私聊的用户ID，逗号分隔）后重试。"
+      return
+    fi
+    val=$(_json_escape "$val")
+    channels="${channels}\"${name}\":{\"${json_key}\":\"${val}\",\"dmPolicy\":\"allowlist\",\"allowFrom\":${allow}},"
+    ACTIVE_CHANNELS="${ACTIVE_CHANNELS}  ✅ ${label}（白名单 ${allow}）\n"
+  }
+
+  # 辅助函数: 添加双参数频道（强制白名单）
   _add_dual_channel() {
-    local name="$1" env1="$2" key1="$3" env2="$4" key2="$5" label="$6"
+    local name="$1" env1="$2" key1="$3" env2="$4" key2="$5" label="$6" allow_env="$7"
     local val1="${!env1:-}" val2="${!env2:-}"
     if [[ -n "$val1" && -n "$val2" ]]; then
+      local allow
+      allow=$(_allow_array "${!allow_env:-}")
+      if [[ -z "$allow" ]]; then
+        echo "[PocketClaw] ⚠ ${label} 已配置，但未设置白名单 ${allow_env}，出于安全已跳过该频道。"
+        return
+      fi
       val1=$(_json_escape "$val1")
       val2=$(_json_escape "$val2")
-      channels="${channels}\"${name}\":{\"${key1}\":\"${val1}\",\"${key2}\":\"${val2}\"},"
-      ACTIVE_CHANNELS="${ACTIVE_CHANNELS}  ✅ ${label}\n"
+      channels="${channels}\"${name}\":{\"${key1}\":\"${val1}\",\"${key2}\":\"${val2}\",\"dmPolicy\":\"allowlist\",\"allowFrom\":${allow}},"
+      ACTIVE_CHANNELS="${ACTIVE_CHANNELS}  ✅ ${label}（白名单 ${allow}）\n"
     elif [[ -n "$val1" ]]; then
       echo "[PocketClaw] ⚠ ${label} 需要同时配置 ${env1} 和 ${env2}"
     fi
   }
 
-  _add_simple_channel "telegram" "TELEGRAM_BOT_TOKEN" "botToken" "Telegram"
-  _add_simple_channel "discord" "DISCORD_BOT_TOKEN" "token" "Discord"
-  _add_dual_channel "slack" "SLACK_BOT_TOKEN" "botToken" "SLACK_APP_TOKEN" "appToken" "Slack"
+  _add_simple_channel "telegram" "TELEGRAM_BOT_TOKEN" "botToken" "Telegram" "TELEGRAM_ALLOW_FROM"
+  _add_simple_channel "discord" "DISCORD_BOT_TOKEN" "token" "Discord" "DISCORD_ALLOW_FROM"
+  _add_dual_channel "slack" "SLACK_BOT_TOKEN" "botToken" "SLACK_APP_TOKEN" "appToken" "Slack" "SLACK_ALLOW_FROM"
 
-  # WhatsApp（特殊: allowFrom 是数组）
+  # WhatsApp（allowFrom 必填，本就要求白名单）
   if [[ -n "${WHATSAPP_ALLOW_FROM:-}" ]]; then
-    IFS=',' read -ra WA_NUMS <<< "$WHATSAPP_ALLOW_FROM"
-    local wa_allow="["
-    for num in "${WA_NUMS[@]}"; do
-      num=$(echo "$num" | xargs)
-      wa_allow="${wa_allow}\"${num}\","
-    done
-    wa_allow="${wa_allow%,}]"
-    channels="${channels}\"whatsapp\":{\"allowFrom\":${wa_allow}},"
-    ACTIVE_CHANNELS="${ACTIVE_CHANNELS}  ✅ WhatsApp\n"
+    local wa_allow
+    wa_allow=$(_allow_array "$WHATSAPP_ALLOW_FROM")
+    if [[ -n "$wa_allow" ]]; then
+      channels="${channels}\"whatsapp\":{\"dmPolicy\":\"allowlist\",\"allowFrom\":${wa_allow}},"
+      ACTIVE_CHANNELS="${ACTIVE_CHANNELS}  ✅ WhatsApp（白名单 ${wa_allow}）\n"
+    fi
   fi
 
-  _add_simple_channel "signal" "SIGNAL_PHONE_NUMBER" "number" "Signal"
+  # Signal（OpenClaw 2026.4+：字段 number → account；强制白名单）
+  _add_simple_channel "signal" "SIGNAL_PHONE_NUMBER" "account" "Signal" "SIGNAL_ALLOW_FROM"
 
-  # Google Chat（特殊: 可选 spaces 参数）
+  # Google Chat（2026.4+：serviceAccountKeyFile → serviceAccountFile；顶层 spaces 键已移除）
   if [[ -n "${GOOGLE_CHAT_CREDENTIALS:-}" ]]; then
-    local gc_extra=""
-    [[ -n "${GOOGLE_CHAT_SPACES:-}" ]] && gc_extra=",\"spaces\":\"${GOOGLE_CHAT_SPACES}\""
-    channels="${channels}\"googlechat\":{\"serviceAccountKeyFile\":\"${GOOGLE_CHAT_CREDENTIALS}\"${gc_extra}},"
+    [[ -n "${GOOGLE_CHAT_SPACES:-}" ]] && \
+      echo "[PocketClaw] ⚠ 当前 OpenClaw 版本已移除 Google Chat 顶层 spaces 配置，GOOGLE_CHAT_SPACES 未生效（已忽略）。"
+    channels="${channels}\"googlechat\":{\"serviceAccountFile\":\"$(_json_escape "${GOOGLE_CHAT_CREDENTIALS}")\"},"
     ACTIVE_CHANNELS="${ACTIVE_CHANNELS}  ✅ Google Chat\n"
   fi
 
-  _add_dual_channel "msteams" "MSTEAMS_APP_ID" "appId" "MSTEAMS_APP_PASSWORD" "appPassword" "Microsoft Teams"
+  _add_dual_channel "msteams" "MSTEAMS_APP_ID" "appId" "MSTEAMS_APP_PASSWORD" "appPassword" "Microsoft Teams" "MSTEAMS_ALLOW_FROM"
 
-  # Matrix（三参数）
+  # Matrix（2026.4+：homeserverUrl → homeserver；访问控制走房间成员，不用 allowFrom）
   if [[ -n "${MATRIX_HOMESERVER:-}" && -n "${MATRIX_USER_ID:-}" && -n "${MATRIX_ACCESS_TOKEN:-}" ]]; then
-    channels="${channels}\"matrix\":{\"homeserverUrl\":\"${MATRIX_HOMESERVER}\",\"userId\":\"${MATRIX_USER_ID}\",\"accessToken\":\"${MATRIX_ACCESS_TOKEN}\"},"
+    channels="${channels}\"matrix\":{\"homeserver\":\"$(_json_escape "${MATRIX_HOMESERVER}")\",\"userId\":\"$(_json_escape "${MATRIX_USER_ID}")\",\"accessToken\":\"$(_json_escape "${MATRIX_ACCESS_TOKEN}")\"},"
     ACTIVE_CHANNELS="${ACTIVE_CHANNELS}  ✅ Matrix\n"
   elif [[ -n "${MATRIX_HOMESERVER:-}" ]]; then
     echo "[PocketClaw] ⚠ Matrix 需要同时配置 MATRIX_HOMESERVER、MATRIX_USER_ID 和 MATRIX_ACCESS_TOKEN"
   fi
 
-  _add_dual_channel "bluebubbles" "BLUEBUBBLES_SERVER_URL" "serverUrl" "BLUEBUBBLES_PASSWORD" "password" "BlueBubbles (iMessage)"
-  _add_simple_channel "zalo" "ZALO_OA_ACCESS_TOKEN" "oaAccessToken" "Zalo"
+  # BlueBubbles 与 Zalo：当前 OpenClaw 版本的频道 schema 已变更/移除，旧配置会导致网关拒绝启动，
+  # 故暂不自动生成；如需使用请用 `openclaw configure` 手动配置后通过 config validate 校验。
+  if [[ -n "${BLUEBUBBLES_SERVER_URL:-}" ]]; then
+    echo "[PocketClaw] ⚠ BlueBubbles 在当前 OpenClaw 版本不再受本启动器支持，已跳过（如需请手动配置）。"
+  fi
+  if [[ -n "${ZALO_OA_ACCESS_TOKEN:-}" ]]; then
+    echo "[PocketClaw] ⚠ Zalo 频道 schema 在当前 OpenClaw 版本已变更，本启动器暂不自动生成，已跳过。"
+  fi
 
   # 构建完整 channels JSON
   if [[ -n "$channels" ]]; then
@@ -286,6 +325,22 @@ JSONEOF
   # 如果没有频道配置，移除 heredoc 产生的多余空行
   if [[ -z "$CHANNELS_BLOCK" ]]; then
     sed -i.bak '/^  $/d' "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+  fi
+
+  # 持久防线：用 OpenClaw 自带校验器核对生成的配置是否符合当前版本 schema。
+  # 升级 OpenClaw 后若某个频道/模型字段被改名或移除，这里会给出明确错误并中止，
+  # 而不是让网关在启动时抛出难以理解的崩溃。仅在「显式 invalid」时中止，
+  # 校验器本身缺失/异常不影响启动（fail-open 到由网关自身把关）。
+  if command -v openclaw >/dev/null 2>&1; then
+    local _vout
+    _vout=$(openclaw config validate --json 2>/dev/null || true)
+    if printf '%s' "$_vout" | grep -q '"valid":false'; then
+      echo "[PocketClaw] ❌ 生成的 openclaw.json 未通过 schema 校验（与当前 OpenClaw 版本不兼容）："
+      openclaw config validate 2>&1 | sed 's/^/    /'
+      echo "[PocketClaw]    多为某个频道/模型字段在新版本被改名或移除所致。"
+      echo "[PocketClaw]    可先用更少的频道启动，或运行 'openclaw doctor --fix' 查看建议。"
+      exit 1
+    fi
   fi
 
   # 将 token 写入 workspace 供 AI 读取
