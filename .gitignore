@@ -2,7 +2,15 @@
 .env
 secrets/*.key
 secrets/*.pem
+secrets/*.encrypted
 data/credentials/*
+
+# 运行时凭据/状态（由容器在运行时写入 config/workspace，绝不能进仓库或发行包）
+config/workspace/.provider
+config/workspace/.gateway_token
+config/workspace/.host_ip
+config/workspace/.bound_providers
+data/.build_hash
 
 # 加密前的明文
 *.decrypted

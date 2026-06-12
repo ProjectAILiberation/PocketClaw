@@ -297,10 +297,8 @@ if "!MASTER_PASS!"=="" (
     goto :decrypt_retry
 )
 REM 通过 stdin 传递密码，避免 -pass pass: 在进程列表中泄露
-<nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 ^
-    -in "!ENC_FILE!" ^
-    -out "%PROJECT_DIR%\.env" ^
-    -pass stdin 2>nul
+REM PBKDF2 跨平台兼容：先试 600000 迭代，失败再回退 100000（兼容旧 Windows 密文）
+<nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 600000 -in "!ENC_FILE!" -out "%PROJECT_DIR%\.env" -pass stdin 2>nul || <nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 -in "!ENC_FILE!" -out "%PROJECT_DIR%\.env" -pass stdin 2>nul
 if !ERRORLEVEL! neq 0 (
     echo [错误] 解密失败，密码可能不正确，请重新输入。
     if exist "%PROJECT_DIR%\.env" del /q "%PROJECT_DIR%\.env"
@@ -345,7 +343,8 @@ if not exist "!ENC_FILE!" (
 
 :: ── 生成随机网关令牌 ──
 if not defined GATEWAY_AUTH_PASSWORD (
-    for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "-join (1..8 | ForEach-Object { [char[]]'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' | Get-Random })"`) do set "GATEWAY_AUTH_PASSWORD=%%t"
+    REM 安全（修复审计 High）：用 CSPRNG 生成 32 位 token（~190bit），原为 8 位非加密随机
+    for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "$b=New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); -join ($b | ForEach-Object { 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[$_ % 62] })"`) do set "GATEWAY_AUTH_PASSWORD=%%t"
     if not defined GATEWAY_AUTH_PASSWORD set "GATEWAY_AUTH_PASSWORD=pc%RANDOM%%RANDOM%%RANDOM%%RANDOM%"
 )
 
@@ -391,15 +390,15 @@ echo.
 if not exist "%PROJECT_DIR%\data\logs" mkdir "%PROJECT_DIR%\data\logs"
 
 REM 预拉基础镜像（通过镜像加速器，避免构建时卡住）
-docker image inspect node:22.16-slim >nul 2>&1
+docker image inspect node:22-slim >nul 2>&1
 if !ERRORLEVEL! neq 0 (
-    echo [信息] 预拉基础镜像 node:22.16-slim ...
-    powershell -NoProfile -Command "Start-Process docker -ArgumentList 'pull','node:22.16-slim' -NoNewWindow -Wait -PassThru | ForEach-Object { if($_.ExitCode -ne 0) { exit 1 } }" >nul 2>&1
+    echo [信息] 预拉基础镜像 node:22-slim ...
+    powershell -NoProfile -Command "Start-Process docker -ArgumentList 'pull','node:22-slim' -NoNewWindow -Wait -PassThru | ForEach-Object { if($_.ExitCode -ne 0) { exit 1 } }" >nul 2>&1
     if !ERRORLEVEL! neq 0 (
         echo [信息] Docker Hub 拉取超时，尝试阿里云镜像...
-        docker pull registry.cn-hangzhou.aliyuncs.com/library/node:22.16-slim >nul 2>&1
+        docker pull registry.cn-hangzhou.aliyuncs.com/library/node:22-slim >nul 2>&1
         if !ERRORLEVEL! equ 0 (
-            docker tag registry.cn-hangzhou.aliyuncs.com/library/node:22.16-slim node:22.16-slim >nul 2>&1
+            docker tag registry.cn-hangzhou.aliyuncs.com/library/node:22-slim node:22-slim >nul 2>&1
             echo [OK] 通过阿里云镜像获取基础镜像成功
         ) else (
             echo [警告] 基础镜像拉取失败，构建可能很慢

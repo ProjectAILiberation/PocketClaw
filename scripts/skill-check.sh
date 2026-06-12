@@ -8,7 +8,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-SKILLS_DIR="${1:-$PROJECT_DIR/data/skills}"
+# 安全（修复审计 High：原默认扫 data/skills，但实际生效的 Skill 在 config/workspace/skills，
+# 导致这道"L5 Skill 安全扫描"形同虚设）。默认改为扫真正被 agent 加载的目录。
+SKILLS_DIR="${1:-$PROJECT_DIR/config/workspace/skills}"
 MAX_SIZE=51200  # 50KB
 
 # 内置 skill 白名单（SHA-256 校验跳过）

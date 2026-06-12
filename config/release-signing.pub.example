@@ -1,0 +1,28 @@
+# PocketClaw 发布签名公钥（信任锚）—— 占位说明文件
+#
+# 这是一个 *示例/说明* 文件。真正生效的文件名必须是同目录下的：
+#     config/release-signing.pub
+#
+# 它是更新链路验签的唯一信任锚：update.bat / _update.sh 在安装任何更新包之前，
+# 会用此公钥验证更新包的 Ed25519 签名。只要此文件不存在，自动更新会 fail-closed
+# （拒绝安装未验证的包），这是刻意设计的安全默认。
+#
+# ── 维护者一次性启用签名更新的步骤 ──
+#   1) 生成密钥对（私钥留在本机 secrets/，已被 .gitignore；公钥写入此目录）：
+#        bash scripts/sign-release.sh keygen
+#      该命令会生成：
+#        secrets/sign.key             （私钥，离线保管，绝不提交、绝不进发行包）
+#        config/release-signing.pub   （公钥，提交进 Git，作为钉死信任锚）
+#
+#   2) 提交公钥（让所有用户的副本都钉死同一个信任锚）：
+#        git add config/release-signing.pub
+#        git commit -m "chore: pin release signing public key"
+#
+#   3) 每次发布时对 ZIP 签名，并把 .sig 与 ZIP 一起上传到下载源（同目录同名）：
+#        bash scripts/sign-release.sh sign  PocketClaw-vX.Y.Z.zip
+#        # 产物：PocketClaw-vX.Y.Z.zip.sig  → 上传到 pocketclaw.cn 与 GitHub Release
+#
+#   4) 在 CI（.github/workflows/release.yml）中，私钥用仓库 Secret 注入，
+#      在打包后、上传前执行签名，确保每个对外产物都带 .sig。
+#
+# 私钥务必离线/最小授权保管；一旦泄露，攻击者即可签出"看似可信"的恶意更新包。

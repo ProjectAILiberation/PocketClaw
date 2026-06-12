@@ -6,9 +6,11 @@ services:
     container_name: pocketclaw
     restart: unless-stopped
     ports:
-      # 默认开启局域网访问，支持手机等设备通过同一 WiFi 连接
-      # 若仅本机使用，可在 .env 中设置 BIND_IP=127.0.0.1
-      - "${BIND_IP:-0.0.0.0}:18789:18789"
+      # 安全（修复审计 High：默认全网卡暴露）：默认仅绑定本机回环 127.0.0.1。
+      # 一个具备 full 工具档、可执行命令/浏览器的 AI 网关不应默认挂到整个局域网。
+      # 需要手机/平板在同一 WiFi 访问时，再在 .env 中显式设置 BIND_IP=0.0.0.0
+      # （并务必配置好白名单与强 token；不可信 WiFi 下风险自负）。
+      - "${BIND_IP:-127.0.0.1}:18789:18789"
     volumes:
       - ./config/workspace:/home/node/.openclaw/workspace
       - ./工作区:/home/node/.openclaw/工作区

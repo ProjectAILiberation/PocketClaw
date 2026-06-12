@@ -73,7 +73,7 @@ echo.
 echo [信息] 正在加密 .env ...
 
 REM 通过 stdin 传递密码，避免进程列表泄露
-<nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 ^
+<nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 ^
     -in "%ENV_FILE%" ^
     -out "%ENC_FILE%" ^
     -pass stdin
@@ -86,8 +86,8 @@ if errorlevel 1 (
 )
 
 REM 验证: 用同一密码试解密, 确保密文正确
-<nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 ^
-    -in "%ENC_FILE%" -pass stdin > nul 2>&1
+REM PBKDF2 跨平台兼容：先试 600000 迭代，失败再回退 100000（兼容旧 Windows 密文）
+<nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 600000 -in "%ENC_FILE%" -pass stdin || <nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 -in "%ENC_FILE%" -pass stdin > nul 2>&1
 if errorlevel 1 (
     echo [错误] 加密验证失败! 密文可能损坏, 请重试.
     del /q "%ENC_FILE%" 2>nul

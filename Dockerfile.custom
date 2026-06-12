@@ -1,11 +1,15 @@
 # PocketClaw Dockerfile
 # 通过 npm 安装 OpenClaw，无需克隆源码，构建更快更稳定
 
-FROM node:22.16-slim
+# 基础镜像：钉死到 digest 保证可复现（node:22-slim 滚动标签 = 当前 22.x LTS，满足
+# OpenClaw 2026.6.5 要求的 engines node>=22.19.0；旧的 22.16 已不满足）。
+# 如需升级基础镜像，请在构建环境用以下命令重新解析 digest 后替换：
+#   docker buildx imagetools inspect node:22-slim
+FROM node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
 
 LABEL maintainer="PocketClaw" \
       description="PocketClaw - OpenClaw 一键部署方案" \
-      org.opencontainers.image.source="https://github.com/pocketclaw"
+      org.opencontainers.image.source="https://github.com/tinqiao-oss/PocketClaw"
 
 WORKDIR /app
 
@@ -69,11 +73,19 @@ RUN git config --global url.https://github.com/.insteadOf ssh://git@github.com/ 
 # docker compose build --build-arg CACHE_DATE=$(date +%s)
 ARG CACHE_DATE=0
 
+# OpenClaw 版本钉死（供应链安全）：
+#   - 不再用 @latest 浮动，避免构建不可复现 / 撞上被劫持的 npm 发布（参见 Cline 2.3.0 事件）。
+#   - 升级前必须在隔离环境跑 `openclaw config validate` + 验证 gateway-patch.py 仍能注入，
+#     再同步修改此处版本号、VERSION、CHANGELOG。
+ARG OPENCLAW_VERSION=2026.6.5
+ARG CLAWHUB_VERSION=0.21.0
+
 # 安装 OpenClaw（使用淘宝 npm 镜像加速，国内网络友好）
 RUN --mount=type=cache,target=/root/.npm \
     npm config set registry https://registry.npmmirror.com && \
-    npm install -g openclaw@latest && \
-    (npm install -g clawhub@latest 2>/dev/null || true)
+    npm install -g "openclaw@${OPENCLAW_VERSION}" && \
+    ( npm install -g "clawhub@${CLAWHUB_VERSION}" \
+      || echo "[PocketClaw] ⚠ clawhub@${CLAWHUB_VERSION} 安装失败：远程技能市场将不可用（本地技能不受影响）" )
 
 # 复制 VERSION（放在 npm install 之后，避免版本号变更时重新下载 openclaw）
 COPY VERSION /tmp/POCKETCLAW_VERSION
@@ -95,7 +107,10 @@ RUN mkdir -p /home/node/.openclaw/workspace \
 COPY --chown=node:node config/openclaw.json /home/node/.openclaw/openclaw.json
 
 # 给 node 用户赋权 control-ui 目录和 gateway JS（启动时需要注入自定义路由）
+# 注意：OpenClaw 2026.4+ 把 HTTP handler 从 gateway-cli-*.js 移到了 server.impl-*.js，
+# 故两处都赋写权限（任一文件不存在时忽略）。
 RUN chown -R node:node /usr/local/lib/node_modules/openclaw/dist/control-ui/ 2>/dev/null; \
+    chmod u+w /usr/local/lib/node_modules/openclaw/dist/server.impl-*.js 2>/dev/null; \
     chmod u+w /usr/local/lib/node_modules/openclaw/dist/gateway-cli-*.js 2>/dev/null; \
     true
 
@@ -111,12 +126,21 @@ COPY --chown=node:node scripts/gateway-patch.py /app/scripts/gateway-patch.py
 RUN chmod +x /app/entrypoint.sh
 
 # ── 构建时注入 UI / 路由（read_only 容器运行时无法写入镜像层） ──
-RUN cp /app/config/mobile.html /usr/local/lib/node_modules/openclaw/dist/control-ui/mobile.html 2>/dev/null; \
-    chown node:node /usr/local/lib/node_modules/openclaw/dist/control-ui/mobile.html 2>/dev/null; \
-    true
+# control-ui 目录由 openclaw 安装产生，必然存在；mobile.html 复制失败应让构建失败而非静默忽略。
+RUN cp /app/config/mobile.html /usr/local/lib/node_modules/openclaw/dist/control-ui/mobile.html \
+    && chown node:node /usr/local/lib/node_modules/openclaw/dist/control-ui/mobile.html
+
+# 注入自定义路由：失败必须让构建硬失败（不再 `2>/dev/null || true` 吞错）。
+# gateway-patch.py 内含注入后自检，若上游再次改动 dist 结构、注入点失效，此步会非零退出，
+# 从而在构建阶段就暴露「手机专属页面将打不开」的问题，而不是发布后才被用户发现。
 RUN CONTROL_UI_DIR=/usr/local/lib/node_modules/openclaw/dist/control-ui \
     GW_DIR=/usr/local/lib/node_modules/openclaw/dist \
-    python3 /app/scripts/gateway-patch.py 2>/dev/null || true
+    python3 /app/scripts/gateway-patch.py
+
+# 构建期冒烟自检：确认 mobile.html 与自定义路由 marker 都已就位
+RUN test -f /usr/local/lib/node_modules/openclaw/dist/control-ui/mobile.html \
+    && grep -rq "pocketclaw-custom-files" /usr/local/lib/node_modules/openclaw/dist/ \
+    && echo "[PocketClaw] ✅ 构建期注入自检通过"
 
 USER node
 

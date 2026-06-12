@@ -12,7 +12,7 @@ check_and_update() {
     echo "[信息] 正在检查更新..."
 
     local VERSION_API="https://pocketclaw.cn/downloads/version.json"
-    local VERSION_API_BACKUP="https://raw.githubusercontent.com/pocketclaw/pocketclaw/main/version.json"
+    local VERSION_API_BACKUP="https://raw.githubusercontent.com/tinqiao-oss/PocketClaw/main/version.json"
     local LATEST_VER="" DOWNLOAD_URL="" DOWNLOAD_URL_BACKUP="" VERSION_JSON=""
 
     if command -v curl &>/dev/null; then
@@ -62,6 +62,21 @@ check_and_update() {
     _do_update "$PROJECT_DIR" "$DOWNLOAD_URL" "$DOWNLOAD_URL_BACKUP"
 }
 
+# ── 下载地址白名单校验 ──
+# 只允许 HTTPS + 固定可信主机，拒绝 http:// 与任意主机（version.json 由服务器控制，
+# 不加白名单则等于让服务器决定从哪里下载并安装可执行脚本）。
+_url_is_allowed() {
+    local url="$1"
+    case "$url" in
+        https://pocketclaw.cn/*) return 0 ;;
+        https://*.pocketclaw.cn/*) return 0 ;;
+        https://github.com/tinqiao-oss/PocketClaw/*) return 0 ;;
+        https://raw.githubusercontent.com/tinqiao-oss/PocketClaw/*) return 0 ;;
+        https://objects.githubusercontent.com/*) return 0 ;;  # GitHub release 资产重定向目标
+        *) return 1 ;;
+    esac
+}
+
 # ── 执行更新 ──
 _do_update() {
     local PROJECT_DIR=$1
@@ -71,24 +86,52 @@ _do_update() {
     echo ""
     echo "[更新] 正在下载更新包..."
     local UPDATE_ZIP="/tmp/PocketClaw-update.zip"
+    local UPDATE_SIG="/tmp/PocketClaw-update.zip.sig"
     local UPDATE_DIR="/tmp/PocketClaw-update"
-    local DL_OK=0
+    local DL_OK=0 USED_URL=""
 
-    if curl -sfL --connect-timeout 30 "$DOWNLOAD_URL" -o "$UPDATE_ZIP" 2>/dev/null; then
-        DL_OK=1
-    elif [ -n "$DOWNLOAD_URL_BACKUP" ]; then
-        echo "[信息] 主下载源不可用，尝试备用源..."
-        if curl -sfL --connect-timeout 30 "$DOWNLOAD_URL_BACKUP" -o "$UPDATE_ZIP" 2>/dev/null; then
-            DL_OK=1
+    # 选择一个通过白名单校验的下载地址（主源优先，回退备用源）
+    local CAND
+    for CAND in "$DOWNLOAD_URL" "$DOWNLOAD_URL_BACKUP"; do
+        [ -z "$CAND" ] && continue
+        if ! _url_is_allowed "$CAND"; then
+            echo "[安全] 拒绝不可信的下载地址（非白名单/非 HTTPS）：$CAND"
+            continue
         fi
-    fi
+        # 注意：不使用 -L 跟随跨域重定向到任意主机；GitHub 资产的重定向目标已在白名单内，
+        # 故仅对 github.com 源单独允许一次重定向。
+        local CURL_OPTS=(-sf --connect-timeout 30 --proto '=https' --tlsv1.2)
+        case "$CAND" in https://github.com/*) CURL_OPTS+=(-L) ;; esac
+        if curl "${CURL_OPTS[@]}" "$CAND" -o "$UPDATE_ZIP" 2>/dev/null; then
+            DL_OK=1; USED_URL="$CAND"
+            # 同名 .sig（与 ZIP 同目录同名 + .sig）
+            curl "${CURL_OPTS[@]}" "${CAND}.sig" -o "$UPDATE_SIG" 2>/dev/null || true
+            break
+        fi
+    done
 
     if [ "$DL_OK" -ne 1 ]; then
-        echo "[错误] 下载失败，请检查网络或手动访问 pocketclaw.cn 下载"
+        echo "[错误] 下载失败或地址不可信，请检查网络或手动访问 pocketclaw.cn 下载"
+        rm -f "$UPDATE_ZIP" "$UPDATE_SIG"
         return 1
     fi
 
-    echo "[更新] 下载完成，正在解压..."
+    # ── 强制验签（修复审计 Critical #1：更新链路零验证）──
+    # 在解压/覆盖任何文件之前，用钉死在仓库内的公钥验证 Ed25519 签名，fail-closed。
+    echo "[更新] 正在验证更新包签名..."
+    local _vrc=0
+    bash "$PROJECT_DIR/scripts/sign-release.sh" verify "$UPDATE_ZIP" || _vrc=$?
+    if [ "$_vrc" -eq 2 ]; then
+        echo "[安全] 维护者尚未启用签名更新，出于安全已禁用自动安装。"
+        echo "       请前往 pocketclaw.cn 手动下载并自行核对来源后再更新。"
+        rm -f "$UPDATE_ZIP" "$UPDATE_SIG"; rm -rf "$UPDATE_DIR"
+        return 1
+    elif [ "$_vrc" -ne 0 ]; then
+        echo "[安全] 更新包验签失败，已中止安装并删除下载文件（疑似被篡改或来源不可信）。"
+        rm -f "$UPDATE_ZIP" "$UPDATE_SIG"; rm -rf "$UPDATE_DIR"
+        return 1
+    fi
+    echo "[更新] 签名验证通过（来源：$USED_URL），正在解压..."
     rm -rf "$UPDATE_DIR"
     unzip -qo "$UPDATE_ZIP" -d "$UPDATE_DIR" 2>/dev/null || {
         python3 -c "import zipfile; zipfile.ZipFile('$UPDATE_ZIP').extractall('$UPDATE_DIR')" 2>/dev/null
@@ -105,7 +148,7 @@ _do_update() {
 
     if [ -z "$PAYLOAD" ]; then
         echo "[错误] 更新包格式异常，请手动更新"
-        rm -rf "$UPDATE_DIR" "$UPDATE_ZIP"
+        rm -rf "$UPDATE_DIR" "$UPDATE_ZIP" "$UPDATE_SIG"
         return 1
     fi
 
@@ -138,5 +181,5 @@ _do_update() {
     echo "       正在继续启动新版本..."
     echo "============================================"
     echo ""
-    rm -rf "$UPDATE_DIR" "$UPDATE_ZIP"
+    rm -rf "$UPDATE_DIR" "$UPDATE_ZIP" "$UPDATE_SIG"
 }

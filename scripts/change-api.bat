@@ -216,8 +216,8 @@ if not exist "%ENV_FILE%" (
     if exist "%ENC_FILE%" (
         echo [信息] 正在解密 .env ...
         for /f "delims=" %%p in ('powershell -NoProfile -Command "$p = Read-Host -Prompt '  Master Password' -AsSecureString; [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($p))"') do set "MASTER_PASS=%%p"
-        <nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 ^
-            -in "%ENC_FILE%" -out "%ENV_FILE%" -pass stdin 2>nul
+        REM PBKDF2 跨平台兼容：先试 600000 迭代，失败再回退 100000（兼容旧 Windows 密文）
+<nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 600000 -in "%ENC_FILE%" -out "%ENV_FILE%" -pass stdin 2>nul || <nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 -in "%ENC_FILE%" -out "%ENV_FILE%" -pass stdin 2>nul
         if errorlevel 1 (
             echo [错误] 解密失败。
             popd ^& pause ^& exit /b 1
@@ -254,7 +254,7 @@ if exist "!PROVIDER_FILE!" (
 REM 重新加密
 if "!NEED_REENCRYPT!"=="1" (
     echo [信息] 重新加密 .env ...
-    <nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 ^
+    <nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 ^
         -in "%ENV_FILE%" -out "%ENC_FILE%" -pass stdin 2>nul
     if errorlevel 1 (
         echo [错误] 重新加密失败。
@@ -271,8 +271,8 @@ REM 更新或创建 .env 文件
 if not exist "%ENV_FILE%" (
     if exist "%ENC_FILE%" (
         for /f "delims=" %%p in ('powershell -NoProfile -Command "$p = Read-Host -Prompt '  Master Password' -AsSecureString; [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($p))"') do set "MASTER_PASS=%%p"
-        <nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 ^
-            -in "%ENC_FILE%" -out "%ENV_FILE%" -pass stdin 2>nul
+        REM PBKDF2 跨平台兼容：先试 600000 迭代，失败再回退 100000（兼容旧 Windows 密文）
+<nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 600000 -in "%ENC_FILE%" -out "%ENV_FILE%" -pass stdin 2>nul || <nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 -in "%ENC_FILE%" -out "%ENV_FILE%" -pass stdin 2>nul
         set "NEED_REENCRYPT=1"
     )
 )
@@ -292,7 +292,7 @@ echo   [OK] .env 已更新
 
 if "!NEED_REENCRYPT!"=="1" (
     echo [信息] 重新加密 .env ...
-    <nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 ^
+    <nul set /p ="!MASTER_PASS!"| openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 ^
         -in "%ENV_FILE%" -out "%ENC_FILE%" -pass stdin 2>nul
     if errorlevel 1 (
         echo [错误] 重新加密失败。

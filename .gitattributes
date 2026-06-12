@@ -1,0 +1,23 @@
+# 强制 Unix 换行：这些文件在容器/Unix 下执行，CRLF 会导致
+# `exec /app/entrypoint.sh: no such file or directory`（shebang 带 \r）等故障。
+# 防止 Windows 上 core.autocrlf=true 的克隆把它们变成 CRLF 后构建出无法启动的镜像。
+*.sh            text eol=lf
+*.command       text eol=lf
+*.py            text eol=lf
+Dockerfile*     text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+.env.example    text eol=lf
+.env.channels.example text eol=lf
+
+# Windows 批处理 / PowerShell：这些文件是 GBK 编码且必须 CRLF。
+# 标记为 -text（按二进制对待）以完整保留字节：既不做换行归一化、也避免 git
+# 对 GBK 字节做任何文本转换导致乱码。它们在 GitHub 上会显示为"二进制差异"，
+# 但内容正确性由 GBK 往返校验与冒烟测试保证。
+*.bat           -text
+*.ps1           -text
+
+# 这些当作二进制/不转换
+*.png           binary
+*.ico           binary
+*.svg           text eol=lf

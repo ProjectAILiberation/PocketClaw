@@ -36,6 +36,10 @@ EXCLUDE_DIRS = {
     "data/skills",
     "__pycache__",
     ".github",
+    # 安全：绝不把 secrets/ 下的任何真实文件打进发行包
+    # （含加密主密钥 master.key、Ed25519 签名私钥 sign.key、维护者的 .env.encrypted）。
+    # build 末尾仍会补一个空的 secrets/ 占位目录（见下方 empty_dir 列表）。
+    "secrets",
 }
 
 EXCLUDE_FILES = {
@@ -43,13 +47,24 @@ EXCLUDE_FILES = {
     ".DS_Store",
     ".host_ip",
     ".gateway_token",
+    # 运行时明文凭据 / 状态：绝不分发（API key 明文、已绑定提供商）
+    ".provider",
+    ".bound_providers",
     ".build_hash",
     ".gitignore",
+    # 开发备忘（.gitignore 注明不参与分发，但 git 忽略不等于打包排除）
+    "开发备忘.md",
 }
 
 EXCLUDE_EXTENSIONS = {
     ".pyc",
     ".pyo",
+    # 纵深防御：任何密钥/明文都不进包
+    ".key",
+    ".pem",
+    ".encrypted",
+    ".decrypted",
+    ".pc-backup",
 }
 
 

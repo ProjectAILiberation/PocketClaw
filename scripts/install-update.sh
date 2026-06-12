@@ -102,6 +102,27 @@ echo "  更新至:   v${NEW_VERSION}"
 echo "============================================"
 echo ""
 
+# ── 安全：手动安装包的来源校验 ──
+# 此脚本会用 _payload 里的文件覆盖你的 scripts/、docker-compose.yml 等（下次启动即执行）。
+# 若随包提供了对应的签名 ZIP（update.zip + update.zip.sig），用「现有安装」里钉死的公钥验签
+# （而非 payload 里的，避免攻击者连公钥一起替换）；否则明确提示来源信任要求。
+SIGNED_ZIP=""
+for z in "$SCRIPT_DIR/update.zip" "$SCRIPT_DIR/../PocketClaw-update.zip" "$PAYLOAD_DIR/../update.zip"; do
+    [ -f "$z" ] && [ -f "${z}.sig" ] && { SIGNED_ZIP="$z"; break; }
+done
+if [ -n "$SIGNED_ZIP" ] && [ -f "$TARGET_DIR/scripts/sign-release.sh" ] && [ -f "$TARGET_DIR/config/release-signing.pub" ]; then
+    if bash "$TARGET_DIR/scripts/sign-release.sh" verify "$SIGNED_ZIP"; then
+        green "[安全] 更新包签名验证通过。"
+    else
+        red "[安全] 更新包签名验证失败，已中止安装。"
+        exit 1
+    fi
+else
+    yellow "[安全提示] 这是一个手动分发的更新包，未随附可验证的签名。"
+    echo "          安装它等于信任提供者：它会覆盖可执行脚本并在下次启动时运行。"
+    echo "          请仅安装来自你信任来源（官方 pocketclaw.cn / 本人）的更新包。"
+fi
+
 read -rp "确认安装更新? (y/N): " CONFIRM
 if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
     echo "已取消。"

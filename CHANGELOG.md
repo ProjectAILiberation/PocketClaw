@@ -2,6 +2,40 @@
 
 All notable changes to PocketClaw will be documented in this file.
 
+## [1.4.0] - 2026-06-12
+
+### 升级 OpenClaw 2026.3.13 → 2026.6.5（已用官方 `openclaw config validate` 实测兼容）
+- Dockerfile：`openclaw` 版本钉死为 `2026.6.5`（不再 `@latest` 浮动），`clawhub` 钉死 `0.21.0`；
+  基础镜像升级到满足 `node>=22.19.0` 的 `node:22-slim` 并按 **digest 钉死**（可复现）。
+- 配置生成（entrypoint.sh）适配新版 schema：
+  - `models.providers.*.models` 由字符串数组改为 `[{id,name}]` 对象（旧形状会被新版拒绝、网关拒启动）。
+  - Signal 频道字段 `number` → `account`；Google Chat `serviceAccountKeyFile` → `serviceAccountFile`（移除已失效的 `spaces`）；Matrix `homeserverUrl` → `homeserver`。
+  - BlueBubbles、Zalo 频道在新版 schema 已移除/变更，暂不自动生成（配置了会明确提示跳过）。
+- 重写 `gateway-patch.py`：上游已把 HTTP handler 从 `gateway-cli-*.js` 迁到 `server.impl-*.js`
+  并改为 `requestStages` 派发架构。新补丁按派发点注入自定义路由，含注入后自检；
+  Dockerfile 不再 `2>/dev/null || true` 吞错——注入失败会让构建**硬失败**，附构建期冒烟自检。
+- entrypoint.sh 启动前运行 `openclaw config validate`，配置不兼容时给出明确错误并中止（持久防线）。
+
+### 安全加固（依据一次深度审计）
+- **更新链路强制验签（修复零验证 RCE）**：`_update.sh` / `update.bat` / `install-update.sh` 在安装前
+  用**钉死在仓库内**的公钥（`config/release-signing.pub`）验证更新包 Ed25519 签名，fail-closed；
+  `sign-release.sh` 移除"无签名即放行""从包内读公钥"等绕过点；下载地址加 HTTPS + 主机白名单。
+  （维护者需一次性 `sign-release.sh keygen` 并提交公钥后，签名更新才会启用——见 `config/release-signing.pub.example`。）
+- **移除 `docker pull pocketclaw/pocketclaw:latest` 抢注快速路径**，一律本地按钉死版本构建；
+  修正指向非本项目命名空间的备用源为 `tinqiao-oss/PocketClaw`。
+- **网关默认仅绑定 `127.0.0.1`**（原为 `0.0.0.0` 全网卡暴露）；手机访问需用户显式设 `BIND_IP=0.0.0.0`。
+- **所有 IM 频道强制发送方白名单**（`<CHAN>_ALLOW_FROM` + `dmPolicy:allowlist`），未配白名单的频道拒绝接入，
+  关闭"互联网陌生人私聊全权限 Agent"通道。
+- **移动端 WebUI**：修复裸 URL 自动链接导致的存储型 XSS；执行审批由"自动批准全部"改为**人在回路确认**。
+- **凭据卫生**：`.gitignore` 纳入 `.provider`/`.gateway_token`/`.host_ip`/`.bound_providers`；
+  已提交的运行时凭据 `git rm --cached` 取消跟踪；`build_zip.py` 排除 `secrets/`、`.provider`、`*.key/*.pem/*.encrypted`。
+- **跨平台加密一致性**：Windows 全部加密路径 PBKDF2 迭代 100000 → **600000**，解密路径先试 600K 再回退 100K，
+  修复"macOS 加密的 U 盘在 Windows 无法解密"。
+- **Windows 网关 token** 由 8 位非加密随机改为 **32 位 CSPRNG**（与文档承诺一致）。
+- 提示词/技能加固：`notes` 标题做路径穿越清洗；`skill-check` 改扫真正生效的 `config/workspace/skills`；
+  `reminders` 标注 heartbeat 不可信数据、禁止当指令执行；`AGENTS.md` 移除"读取并明文回显 gateway token"的自相矛盾指引。
+- `start.sh` 不再静默改写宿主机全局 `daemon.json`，改为征得用户同意 + 备份原文件。
+
 ## [1.3.5] - 2026-03-20
 
 ### Changed
